@@ -20,7 +20,7 @@ STATIC = Path(__file__).resolve().parent.parent / "static"
 
 
 class ChatRequest(BaseModel):
-    case_id: str
+    case_id: str | None = None   # None → cross-case mode: the bot finds the relevant case(s)
     message: str = Field(min_length=1, max_length=4000)
     history: list[dict[str, str]] = []
 
@@ -44,17 +44,32 @@ def case(case_id: str):
     return {"data": c}
 
 
+@app.get("/api/models")
+def models():
+    """Diagnostic: lists models visible to your key via the inference endpoint.
+    If this 401s the key is wrong; if it 404s the base URL is wrong."""
+    try:
+        ids = sorted(m.id for m in agent.client().models.list().data)
+        return {"base_url": agent.INFERENCE_BASE_URL, "configured_model": agent.MODEL,
+                "configured_model_available": agent.MODEL in ids, "models": ids}
+    except Exception as e:
+        raise HTTPException(502, f"{e} (base_url={agent.INFERENCE_BASE_URL})")
+
+
 @app.get("/api/tools")
 def tools():
     """Expose tool schemas so you can inspect what the model can call."""
-    return {"data": dataset.TOOLS}
+    return {"case_scoped": dataset.TOOLS, "cross_case": dataset.CROSS_CASE_TOOLS}
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     """Server-Sent Events: one JSON event per line, `data: {...}\\n\\n`."""
+    case_id = (req.case_id or "").strip().upper() or None
+    if case_id in ("ALL", "AUTO", "NONE"):
+        case_id = None
     def gen():
-        for ev in agent.investigate(req.case_id, req.message, req.history):
+        for ev in agent.investigate(case_id, req.message, req.history):
             yield f"data: {json.dumps(ev)}\n\n"
         yield "data: {\"type\":\"done\"}\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream",

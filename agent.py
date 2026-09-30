@@ -16,9 +16,16 @@ from openai import OpenAI
 
 from . import dataset
 
-INFERENCE_BASE_URL = os.getenv("INFERENCE_BASE_URL", "https://inference.do-ai.run/v1")
-MODEL = os.getenv("MODEL", "anthropic-claude-sonnet-5.5")
-MAX_STEPS = int(os.getenv("MAX_STEPS", "12"))
+def _normalise_base_url(url: str) -> str:
+    """DO docs quote https://inference.do-ai.run; the OpenAI SDK needs the /v1 suffix.
+    Without it every call 404s with {'detail': 'Not Found'}."""
+    url = url.strip().rstrip("/")
+    return url if url.endswith("/v1") else url + "/v1"
+
+
+INFERENCE_BASE_URL = _normalise_base_url(os.getenv("INFERENCE_BASE_URL", "https://inference.do-ai.run/v1"))
+MODEL = os.getenv("MODEL", "anthropic-claude-sonnet-5.5").strip()
+MAX_STEPS = int(os.getenv("MAX_STEPS", "16"))  # cross-case runs need a few extra steps
 
 _client: OpenAI | None = None
 
@@ -39,9 +46,9 @@ search-service, cart-service, checkout-service, payment-adapter, order-service, 
 6 infra components (postgres-primary, postgres-replica, valkey, kafka, spaces-cdn, lb-public) and
 4 uninstrumented third parties (paygate, taxcalc, mailsend, addrverify).
 
-You are investigating ONE support case. All evidence is confined to a 3-hour window ending when
-the case was opened. You have read-only tools over alerts, change events, logs, metrics, traces and
-a knowledge base (runbooks, postmortems, architecture, ownership).
+Each support case is a 3-hour evidence window ending when the case was opened. You have read-only
+tools over alerts, change events, logs, metrics, traces and a knowledge base (runbooks, postmortems,
+architecture, ownership).
 
 Method — work like a senior SRE:
 1. Start with get_case, then get_alerts and get_events to see what fired and what changed.
@@ -64,8 +71,25 @@ Answer rules:
 """
 
 
+CROSS_CASE_PROMPT = """
+MODE: no case is pre-selected. The user may paste a customer complaint, describe symptoms, name a
+case ID, or ask a question that spans several cases ("which incidents involved Kafka?").
+
+Locating the right case(s):
+1. If the message names a CASE-0NN, use it directly.
+2. Otherwise call find_cases with the key symptoms (and/or list_cases to read all 20). Confirm the
+   top candidates with get_case + get_alerts before committing; say which case you matched and why.
+   If two cases plausibly match, say so, pick the best one, and mention the alternative.
+3. For fleet-wide questions use search_alerts_all_cases / search_logs_all_cases /
+   search_events_all_cases, then drill into individual cases with the case-scoped tools.
+4. Every case-scoped tool call MUST include case_id.
+Always open your answer with the case(s) you investigated, e.g. "Matched: CASE-001 (checkout-service, opened 2026-03-14)".
+"""
+
+
 def _case_context(case: dict[str, Any]) -> str:
     return (
+        f"MODE: one case is pre-selected; case-scoped tools default to it.\n"
         f"Current case: {case.get('case_id')}\n"
         f"Opened: {case.get('created_at')}\n"
         f"Evidence window: {case['window']['from']} -> {case['window']['to']}\n"
@@ -76,11 +100,12 @@ def _case_context(case: dict[str, Any]) -> str:
 
 
 def investigate(
-    case_id: str,
+    case_id: str | None,
     user_message: str,
     history: list[dict[str, str]] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """
+    case_id=None → cross-case mode: the model locates the relevant case(s) itself.
     Yields events:
       {"type":"tool_call","name":..,"args":{..}}
       {"type":"tool_result","name":..,"chars":N,"preview":".."}
@@ -88,14 +113,18 @@ def investigate(
       {"type":"error","message":".."}
     `history` is a list of prior {"role":"user"|"assistant","content":...} turns.
     """
-    case = dataset.get_case(case_id)
-    if not case:
-        yield {"type": "error", "message": f"Unknown case {case_id}"}
-        return
+    if case_id:
+        case = dataset.get_case(case_id)
+        if not case:
+            yield {"type": "error", "message": f"Unknown case {case_id}"}
+            return
+        system = SYSTEM_PROMPT + "\n" + _case_context(case)
+        tools = dataset.TOOLS
+    else:
+        system = SYSTEM_PROMPT + CROSS_CASE_PROMPT
+        tools = dataset.CROSS_CASE_TOOLS + dataset.TOOLS
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT + "\n" + _case_context(case)},
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     for turn in history or []:
         if turn.get("role") in ("user", "assistant") and turn.get("content"):
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -106,13 +135,15 @@ def investigate(
             resp = client().chat.completions.create(
                 model=MODEL,
                 messages=messages,
-                tools=dataset.TOOLS,
-                tool_choice="auto",
+                tools=tools,
+                # NB: no tool_choice — Claude Sonnet/Opus 5.x on DO reject that parameter.
                 temperature=0.1,
                 max_tokens=2500,
             )
         except Exception as e:  # network / auth / quota errors
-            yield {"type": "error", "message": f"Inference call failed: {e}"}
+            yield {"type": "error", "message":
+                   f"Inference call failed: {e} (base_url={INFERENCE_BASE_URL}, model={MODEL}). "
+                   "Check GET /api/models to confirm the key works and the model ID exists."}
             return
 
         msg = resp.choices[0].message
