@@ -224,4 +224,4 @@ Dockerfile, .do/app.yaml, requirements.txt, .env.example
 ```
 
 Environment variables: `DO_MODEL_ACCESS_KEY` (required), `MODEL`, `INFERENCE_BASE_URL`,
-`DATASET_BASE_URL`, `MAX_STEPS` (default 12), `MAX_TOOL_RESULT_CHARS` (default 14000).
+`DATASET_BASE_URL`, `MAX_STEPS` (default 12), `MAX_TOOL_RESULT_CHARS` (default 14000)
