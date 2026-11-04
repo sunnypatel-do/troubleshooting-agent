@@ -41,6 +41,11 @@
   .chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 20px 10px}
   .chip{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--muted);cursor:pointer;background:transparent}
   .chip:hover{border-color:var(--accent);color:var(--text)}
+  .metrics{margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:#0d1628;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .metrics .grid{display:flex;flex-wrap:wrap;gap:6px 22px}.metrics b{color:var(--text)}.metrics .cost{color:var(--ok)}
+  .metrics table{border-collapse:collapse;margin-top:6px;width:100%}.metrics td,.metrics th{padding:2px 10px 2px 0;text-align:left;font-weight:400}
+  .metrics summary{cursor:pointer;margin-top:6px}
+  .step .m{color:var(--warn)}
   .spin{display:inline-block;width:10px;height:10px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite;vertical-align:middle}
   @keyframes s{to{transform:rotate(360deg)}}
 </style>
@@ -155,8 +160,20 @@ $('#f').onsubmit = async e => {
           s.innerHTML=`<span class="n">▸ ${ev.name}</span>(${esc(JSON.stringify(ev.args))}) <span class="spin"></span>`; trail.appendChild(s);
         } else if(ev.type==='tool_result'){
           const s=trail.lastElementChild; if(s){ s.querySelector('.spin')?.remove();
-            s.insertAdjacentHTML('beforeend',` <span class="r">✓ ${ev.chars} chars</span> <details><summary>peek</summary><pre>${esc(ev.preview)}…</pre></details>`);}
+            s.insertAdjacentHTML('beforeend',` <span class="r">✓ ${ev.chars} chars</span> <span class="m">${ev.latency_ms} ms</span> <details><summary>peek</summary><pre>${esc(ev.preview)}…</pre></details>`);}
         } else if(ev.type==='answer'){ answer=ev.content; body.innerHTML=md(answer); }
+        else if(ev.type==='metrics'){
+          const sec = ms => (ms/1000).toFixed(2)+'s', n = x => x.toLocaleString();
+          const rows = ev.model_calls_detail.map(c=>`<tr><td>#${c.step}</td><td>${c.latency_ms} ms</td><td>${n(c.prompt_tokens)} in</td><td>${n(c.completion_tokens)} out</td><td>$${c.cost_usd.toFixed(4)}</td></tr>`).join('');
+          const d = document.createElement('div'); d.className='metrics';
+          d.innerHTML = `<div class="grid">
+            <span>⏱ latency <b>${sec(ev.total_latency_ms)}</b> (model ${sec(ev.llm_latency_ms)} · tools ${sec(ev.tool_latency_ms)})</span>
+            <span>🔢 tokens <b>${n(ev.total_tokens)}</b> (${n(ev.prompt_tokens)} in / ${n(ev.completion_tokens)} out)</span>
+            <span>💲 est. cost <b class="cost">$${ev.estimated_cost_usd.toFixed(4)}</b></span>
+            <span>🔁 ${ev.llm_calls} model calls · ${ev.tool_calls} tool calls</span></div>
+            <details><summary>per-call breakdown (prices: $${ev.price_per_1m.input}/$${ev.price_per_1m.output} per 1M in/out — estimate)</summary><table><tr><th>call</th><th>latency</th><th>input</th><th>output</th><th>cost</th></tr>${rows}</table></details>`;
+          bot.appendChild(d);
+        }
         else if(ev.type==='error'){ body.innerHTML=`<span style="color:var(--err)">${esc(ev.message)}</span>`; }
         $('#chat').scrollTop=1e9;
       }

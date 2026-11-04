@@ -18,7 +18,18 @@ def ask(case_id: str, question: str, history: list) -> str:
         if ev["type"] == "tool_call":
             print(f"  ▸ {ev['name']}({ev['args']})", flush=True)
         elif ev["type"] == "tool_result":
-            print(f"    ✓ {ev['chars']} chars", flush=True)
+            print(f"    ✓ {ev['chars']} chars in {ev['latency_ms']} ms", flush=True)
+        elif ev["type"] == "llm_call":
+            print(f"  ◆ model call #{ev['step']}: {ev['latency_ms']} ms · "
+                  f"{ev['prompt_tokens']} in / {ev['completion_tokens']} out · ${ev['cost_usd']:.4f}", flush=True)
+        elif ev["type"] == "metrics":
+            print("  ─── query metrics ───────────────────────────")
+            print(f"  total latency : {ev['total_latency_ms']/1000:.2f}s "
+                  f"(model {ev['llm_latency_ms']/1000:.2f}s, tools {ev['tool_latency_ms']/1000:.2f}s)")
+            print(f"  calls         : {ev['llm_calls']} model, {ev['tool_calls']} tool")
+            print(f"  tokens        : {ev['prompt_tokens']} in + {ev['completion_tokens']} out = {ev['total_tokens']}")
+            print(f"  est. cost     : ${ev['estimated_cost_usd']:.4f} "
+                  f"(@ ${ev['price_per_1m']['input']}/${ev['price_per_1m']['output']} per 1M in/out)\n")
         elif ev["type"] == "answer":
             answer = ev["content"]
             print("\n" + answer + "\n")

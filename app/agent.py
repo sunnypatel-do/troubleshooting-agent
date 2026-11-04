@@ -9,12 +9,17 @@ the UI can render the investigation trail live.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from typing import Any, Generator
 
 from openai import OpenAI
 
 from . import dataset
+from .metrics import QueryMetrics
+
+log = logging.getLogger("agent.metrics")
 
 def _normalise_base_url(url: str) -> str:
     """DO docs quote https://inference.do-ai.run; the OpenAI SDK needs the /v1 suffix.
@@ -130,8 +135,16 @@ def investigate(
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    for _ in range(MAX_STEPS):
+    m = QueryMetrics()
+
+    def finish() -> dict[str, Any]:
+        s = m.summary()
+        log.info("query metrics: %s", json.dumps({k: v for k, v in s.items() if not k.endswith("_detail")}))
+        return {"type": "metrics", **s}
+
+    for step in range(1, MAX_STEPS + 1):
         try:
+            t0 = time.perf_counter()
             resp = client().chat.completions.create(
                 model=MODEL,
                 messages=messages,
@@ -140,17 +153,21 @@ def investigate(
                 temperature=0.1,
                 max_tokens=2500,
             )
+            rec = m.add_llm(resp, time.perf_counter() - t0, step)
         except Exception as e:  # network / auth / quota errors
             yield {"type": "error", "message":
                    f"Inference call failed: {e} (base_url={INFERENCE_BASE_URL}, model={MODEL}). "
                    "Check GET /api/models to confirm the key works and the model ID exists."}
+            yield finish()
             return
+        yield {"type": "llm_call", **rec}
 
         msg = resp.choices[0].message
         tool_calls = msg.tool_calls or []
 
         if not tool_calls:
             yield {"type": "answer", "content": msg.content or "(no answer)"}
+            yield finish()
             return
 
         # Append assistant turn with tool calls, then one tool message per call.
@@ -170,15 +187,22 @@ def investigate(
             except json.JSONDecodeError:
                 args = {}
             yield {"type": "tool_call", "name": name, "args": args}
+            t0 = time.perf_counter()
             result = dataset.run_tool(name, case_id, args)
-            yield {"type": "tool_result", "name": name, "chars": len(result), "preview": result[:300]}
+            trec = m.add_tool(name, time.perf_counter() - t0, len(result))
+            yield {"type": "tool_result", "name": name, "chars": len(result),
+                   "latency_ms": trec["latency_ms"], "preview": result[:300]}
             messages.append({"role": "tool", "tool_call_id": tc.id, "name": name, "content": result})
 
     # Out of steps: force a final answer without tools.
     messages.append({"role": "user", "content":
                      "Stop investigating. Summarise what you found so far, what remains unconfirmed, and the most likely root cause."})
     try:
+        t0 = time.perf_counter()
         resp = client().chat.completions.create(model=MODEL, messages=messages, temperature=0.1, max_tokens=2000)
+        rec = m.add_llm(resp, time.perf_counter() - t0, MAX_STEPS + 1)
+        yield {"type": "llm_call", **rec}
         yield {"type": "answer", "content": resp.choices[0].message.content or ""}
     except Exception as e:
         yield {"type": "error", "message": f"Inference call failed: {e}"}
+    yield finish()
