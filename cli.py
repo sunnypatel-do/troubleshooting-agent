@@ -19,14 +19,22 @@ def ask(case_id: str, question: str, history: list) -> str:
             print(f"  ▸ {ev['name']}({ev['args']})", flush=True)
         elif ev["type"] == "tool_result":
             print(f"    ✓ {ev['chars']} chars in {ev['latency_ms']} ms", flush=True)
+            for r in ev.get("api_requests", []):
+                qs = "&".join(f"{k}={v}" for k, v in r["params"].items())
+                print(f"      ⇢ {r['method']} {r['path']}{'?' + qs if qs else ''} "
+                      f"→ {r['status']} · {r['latency_ms']} ms · {r['bytes']} B", flush=True)
         elif ev["type"] == "llm_call":
-            print(f"  ◆ model call #{ev['step']}: {ev['latency_ms']} ms · "
-                  f"{ev['prompt_tokens']} in / {ev['completion_tokens']} out · ${ev['cost_usd']:.4f}", flush=True)
+            nxt = f" → wants {', '.join(ev['requested_tools'])}" if ev["requested_tools"] else " → final answer"
+            print(f"  ◆ model call #{ev['step']} [{ev['model']}]: {ev['latency_ms']} ms · "
+                  f"{ev['prompt_tokens']} in / {ev['completion_tokens']} out · ${ev['cost_usd']:.4f}"
+                  f" · {ev['finish_reason']}{nxt}", flush=True)
         elif ev["type"] == "metrics":
             print("  ─── query metrics ───────────────────────────")
             print(f"  total latency : {ev['total_latency_ms']/1000:.2f}s "
                   f"(model {ev['llm_latency_ms']/1000:.2f}s, tools {ev['tool_latency_ms']/1000:.2f}s)")
-            print(f"  calls         : {ev['llm_calls']} model, {ev['tool_calls']} tool")
+            print(f"  calls         : {ev['llm_calls']} model, {ev['tool_calls']} tool, "
+                  f"{ev['dataset_requests']} dataset API requests "
+                  f"({ev['dataset_latency_ms']} ms total, {ev['dataset_bytes']} B, {ev['dataset_errors']} errors)")
             print(f"  tokens        : {ev['prompt_tokens']} in + {ev['completion_tokens']} out = {ev['total_tokens']}")
             print(f"  est. cost     : ${ev['estimated_cost_usd']:.4f} "
                   f"(@ ${ev['price_per_1m']['input']}/${ev['price_per_1m']['output']} per 1M in/out)\n")

@@ -153,7 +153,7 @@ def investigate(
                 temperature=0.1,
                 max_tokens=2500,
             )
-            rec = m.add_llm(resp, time.perf_counter() - t0, step)
+            rec = m.add_llm(resp, time.perf_counter() - t0, step, MODEL)
         except Exception as e:  # network / auth / quota errors
             yield {"type": "error", "message":
                    f"Inference call failed: {e} (base_url={INFERENCE_BASE_URL}, model={MODEL}). "
@@ -188,10 +188,10 @@ def investigate(
                 args = {}
             yield {"type": "tool_call", "name": name, "args": args}
             t0 = time.perf_counter()
-            result = dataset.run_tool(name, case_id, args)
-            trec = m.add_tool(name, time.perf_counter() - t0, len(result))
+            result, reqs = dataset.run_tool_traced(name, case_id, args)
+            trec = m.add_tool(name, time.perf_counter() - t0, len(result), reqs)
             yield {"type": "tool_result", "name": name, "chars": len(result),
-                   "latency_ms": trec["latency_ms"], "preview": result[:300]}
+                   "latency_ms": trec["latency_ms"], "api_requests": reqs, "preview": result[:300]}
             messages.append({"role": "tool", "tool_call_id": tc.id, "name": name, "content": result})
 
     # Out of steps: force a final answer without tools.
@@ -200,7 +200,7 @@ def investigate(
     try:
         t0 = time.perf_counter()
         resp = client().chat.completions.create(model=MODEL, messages=messages, temperature=0.1, max_tokens=2000)
-        rec = m.add_llm(resp, time.perf_counter() - t0, MAX_STEPS + 1)
+        rec = m.add_llm(resp, time.perf_counter() - t0, MAX_STEPS + 1, MODEL)
         yield {"type": "llm_call", **rec}
         yield {"type": "answer", "content": resp.choices[0].message.content or ""}
     except Exception as e:

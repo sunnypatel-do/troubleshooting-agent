@@ -92,6 +92,10 @@ const SUGGESTED = [
 let cases = [], current = null, history = [], busy = false;
 const $ = s => document.querySelector(s);
 
+function reqLine(r){
+  const qs = Object.entries(r.params||{}).map(([k,v])=>k+'='+v).join('&');
+  return `${r.method} ${r.path}${qs?'?'+qs:''} → ${r.status} · ${r.latency_ms} ms · ${r.bytes} B`;
+}
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 // Tiny markdown renderer (headings, bold, code, lists, paragraphs) — no external deps.
 function md(src){
@@ -160,18 +164,23 @@ $('#f').onsubmit = async e => {
           s.innerHTML=`<span class="n">▸ ${ev.name}</span>(${esc(JSON.stringify(ev.args))}) <span class="spin"></span>`; trail.appendChild(s);
         } else if(ev.type==='tool_result'){
           const s=trail.lastElementChild; if(s){ s.querySelector('.spin')?.remove();
-            s.insertAdjacentHTML('beforeend',` <span class="r">✓ ${ev.chars} chars</span> <span class="m">${ev.latency_ms} ms</span> <details><summary>peek</summary><pre>${esc(ev.preview)}…</pre></details>`);}
+            const api = (ev.api_requests||[]).map(reqLine).join('\n');
+            s.insertAdjacentHTML('beforeend',` <span class="r">✓ ${ev.chars} chars</span> <span class="m">${ev.latency_ms} ms</span> <span class="m">· ${(ev.api_requests||[]).length} API req</span> <details><summary>peek</summary><pre>${api?esc(api)+'\n\n':''}${esc(ev.preview)}…</pre></details>`);}
         } else if(ev.type==='answer'){ answer=ev.content; body.innerHTML=md(answer); }
         else if(ev.type==='metrics'){
           const sec = ms => (ms/1000).toFixed(2)+'s', n = x => x.toLocaleString();
-          const rows = ev.model_calls_detail.map(c=>`<tr><td>#${c.step}</td><td>${c.latency_ms} ms</td><td>${n(c.prompt_tokens)} in</td><td>${n(c.completion_tokens)} out</td><td>$${c.cost_usd.toFixed(4)}</td></tr>`).join('');
+          const rows = ev.model_calls_detail.map(c=>`<tr><td>#${c.step}</td><td>${esc(c.model||'')}</td><td>${c.latency_ms} ms</td><td>${n(c.prompt_tokens)} in</td><td>${n(c.completion_tokens)} out</td><td>$${c.cost_usd.toFixed(4)}</td><td>${esc(c.finish_reason||'')}${c.requested_tools.length?' → '+esc(c.requested_tools.join(', ')):' → answer'}</td></tr>`).join('');
+          const apiRows = ev.dataset_requests_detail.map(r=>`<tr><td>${esc(r.tool)}</td><td>${esc(r.method+' '+r.path)}</td><td>${esc(Object.entries(r.params||{}).map(([k,v])=>k+'='+v).join('&'))}</td><td style="color:${r.status>=400||r.status<0?'var(--err)':'var(--ok)'}">${r.status}</td><td>${r.latency_ms} ms</td><td>${n(r.bytes)} B</td></tr>`).join('');
           const d = document.createElement('div'); d.className='metrics';
           d.innerHTML = `<div class="grid">
             <span>⏱ latency <b>${sec(ev.total_latency_ms)}</b> (model ${sec(ev.llm_latency_ms)} · tools ${sec(ev.tool_latency_ms)})</span>
             <span>🔢 tokens <b>${n(ev.total_tokens)}</b> (${n(ev.prompt_tokens)} in / ${n(ev.completion_tokens)} out)</span>
             <span>💲 est. cost <b class="cost">$${ev.estimated_cost_usd.toFixed(4)}</b></span>
-            <span>🔁 ${ev.llm_calls} model calls · ${ev.tool_calls} tool calls</span></div>
-            <details><summary>per-call breakdown (prices: $${ev.price_per_1m.input}/$${ev.price_per_1m.output} per 1M in/out — estimate)</summary><table><tr><th>call</th><th>latency</th><th>input</th><th>output</th><th>cost</th></tr>${rows}</table></details>`;
+            <span>🤖 <b>${ev.llm_calls}</b> model calls (${sec(ev.llm_latency_ms)})</span>
+            <span>🔧 <b>${ev.tool_calls}</b> tool calls (${sec(ev.tool_latency_ms)})</span>
+            <span>🌐 <b>${ev.dataset_requests}</b> dataset API requests (${n(ev.dataset_latency_ms)} ms summed, ${n(ev.dataset_bytes)} B${ev.dataset_errors?`, <b style="color:var(--err)">${ev.dataset_errors} errors</b>`:''})</span></div>
+            <details><summary>model calls (prices: $${ev.price_per_1m.input}/$${ev.price_per_1m.output} per 1M in/out — estimate)</summary><table><tr><th>call</th><th>model</th><th>latency</th><th>input</th><th>output</th><th>cost</th><th>result</th></tr>${rows}</table></details>
+            <details><summary>dataset API requests</summary><table><tr><th>tool</th><th>endpoint</th><th>params</th><th>status</th><th>latency</th><th>size</th></tr>${apiRows||'<tr><td colspan=6>none</td></tr>'}</table></details>`;
           bot.appendChild(d);
         }
         else if(ev.type==='error'){ body.innerHTML=`<span style="color:var(--err)">${esc(ev.message)}</span>`; }

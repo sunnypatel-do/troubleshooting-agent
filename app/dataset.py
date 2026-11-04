@@ -6,9 +6,11 @@ Dataset API: https://examplekart-dataset-ovp33.ondigitalocean.app/openapi.json
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -26,9 +28,27 @@ MAX_TOOL_RESULT_CHARS = int(os.getenv("MAX_TOOL_RESULT_CHARS", "14000"))
 _client = httpx.Client(base_url=DATASET_BASE_URL, timeout=20.0)
 
 
+# Collector for dataset API requests made while a tool runs (set by run_tool_traced).
+# A ContextVar keeps concurrent web requests from mixing their logs; the fan-out
+# thread pool copies the context so its calls are recorded too.
+_REQ_LOG: contextvars.ContextVar[list | None] = contextvars.ContextVar("req_log", default=None)
+
+
 def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     clean = {k: v for k, v in (params or {}).items() if v not in (None, "", [])}
-    r = _client.get(path, params=clean)
+    t0 = time.perf_counter()
+    status, size = 0, 0
+    try:
+        r = _client.get(path, params=clean)
+        status, size = r.status_code, len(r.content)
+    except Exception:
+        status = -1  # network error / timeout; run_tool reports the exception
+        raise
+    finally:
+        log = _REQ_LOG.get()
+        if log is not None:
+            log.append({"method": "GET", "path": path, "params": clean, "status": status,
+                        "latency_ms": round((time.perf_counter() - t0) * 1000), "bytes": size})
     if r.status_code >= 400:
         # The API returns RFC 7807 problem documents; pass them through so the
         # model can self-correct (e.g. a misspelled service name).
@@ -104,8 +124,13 @@ def _fan_out(path_suffix: str, params: dict[str, Any], per_case_limit: int) -> A
         return {"case_id": c["case_id"], "affected_area": c["affected_area"],
                 "matched": (r.get("page") or {}).get("total_matched", len(rows)), "sample": rows}
 
+    # Propagate the request-log ContextVar into the worker threads. Each task needs
+    # its own context copy, taken here in the calling thread (a Context can't be
+    # entered by two threads at once).
+    ctxs = [contextvars.copy_context() for _ in cases]
+
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for res in ex.map(one, cases):
+        for res in ex.map(lambda cc: cc[0].run(one, cc[1]), zip(ctxs, cases)):
             if res["matched"]:
                 out.append(res)
     out.sort(key=lambda x: -x["matched"])
@@ -331,6 +356,17 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Read a full knowledge-base document by doc_id (e.g. RB-002, PM-2026-01, OWN-001).",
         "parameters": {"type": "object", "properties": {"case_id": _CASE_ID, "doc_id": {"type": "string"}}, "required": ["doc_id"]}}},
 ]
+
+
+def run_tool_traced(name: str, case_id: str | None, args: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Like run_tool, but also returns every dataset API request the tool made
+    (method, path, params, status, latency_ms, bytes)."""
+    log: list[dict[str, Any]] = []
+    token = _REQ_LOG.set(log)
+    try:
+        return run_tool(name, case_id, args), log
+    finally:
+        _REQ_LOG.reset(token)
 
 
 def run_tool(name: str, case_id: str | None, args: dict[str, Any]) -> str:
